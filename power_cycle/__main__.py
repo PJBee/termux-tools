@@ -57,9 +57,12 @@ from . import (
     run_drain, run_cooldown, run_charge,
 )
 
-# How many recent samples the sparklines retain. ~120 samples at the default
-# 10s cadence is 20 minutes of visible history.
-_HISTORY_LEN = 120
+# How many samples the sparklines retain. The line is downsampled to the
+# display width, so this is sized to cover an entire cycle rather than a
+# trailing window: ~8640 samples at the default 10s cadence is 24 hours, which
+# comfortably spans a full drain → cooldown → charge run. A few thousand floats
+# is negligible memory.
+_HISTORY_LEN = 8640
 
 # Upper bound on the termux-api wakelock shell-outs, so an unresponsive
 # Termux:API app can't make acquiring or (worse) releasing the wakelock hang.
@@ -155,7 +158,9 @@ def main(argv=None):
     if args.wakelock:
         _termux(["termux-wake-lock"])
 
-    # Rolling history shared across phases so sparklines stay continuous.
+    # Full-run history shared across phases. `sparkline` downsamples to fit the
+    # display width, so retaining the whole run lets the level line show the
+    # complete start→target curve instead of a trailing ~20-minute slice.
     history = {
         "cap": deque(maxlen=_HISTORY_LEN),
         "temp": deque(maxlen=_HISTORY_LEN),

@@ -69,7 +69,8 @@ def _estimate_eta(epoch_start, cap_start, epoch_now, cap_now, target_pct):
 
 
 def _run_logged(batt, label, target_pct, stop_when, *,
-                sample_s, history, dashboard, clock, log_to_file, logname=None):
+                sample_s, history, dashboard, clock, log_to_file, logname=None,
+                level_range=(0, 100)):
     """Shared body for drain/charge: sample -> log -> dashboard -> check.
 
     Parameters
@@ -121,7 +122,8 @@ def _run_logged(batt, label, target_pct, stop_when, *,
             eta_s = _estimate_eta(epoch_start, cap_start,
                                   s["epoch"], level, target_pct)
             dashboard.update(label, s, history, clock(),
-                             logname or "(no log)", eta_s=eta_s)
+                             logname or "(no log)", eta_s=eta_s,
+                             level_range=level_range)
 
             if level is not None and stop_when(level, target_pct):
                 break
@@ -149,6 +151,9 @@ def run_drain(batt, target_low, *, sample_s, history, dashboard, clock,
         stop_when=lambda level, target: level <= target,
         sample_s=sample_s, history=history, dashboard=dashboard, clock=clock,
         log_to_file=log_to_file, logname=logname,
+        # Pin the level sparkline from the target floor up to 100% so the
+        # discharge fills the glyph height instead of hugging the top.
+        level_range=(target_low, 100),
     )
 
 

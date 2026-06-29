@@ -34,17 +34,43 @@ def rich_available():
         return False
 
 
-def sparkline(values, width=40):
+def sparkline(values, width=40, lo=None, hi=None, min_span=None):
     """Render an iterable of numbers as a unicode block sparkline.
 
-    `None` values are skipped. Only the most recent `width` points are drawn.
-    The line is auto-scaled between the min and max of the visible window, so
-    it shows *shape*, not absolute magnitude. Returns "" if there's no data.
+    `None` values are skipped. If the series is longer than `width`, it is
+    downsampled into `width` buckets (each column the mean of its bucket) so
+    the line spans the *whole run*, not just the last `width` samples.
+
+    Scaling:
+      * `lo`/`hi` pin the value domain to a fixed range (e.g. 0–100 for a
+        battery percent), so the glyph height reads as absolute magnitude.
+      * When `lo`/`hi` are omitted the line auto-scales to the data's own
+        min/max, showing *shape* rather than magnitude.
+      * `min_span` sets a floor on the domain width. Without it, a slowly
+        changing, quantized signal (integer percent, tenths of a degree)
+        collapses to a 1-unit range and auto-scaling blows that single step
+        up to full height — making a smooth trend look like it jumps between
+        hi and lo. The floor keeps small wiggles small.
+
+    Returns "" if there's no data.
     """
-    vals = [v for v in values if v is not None][-width:]
+    vals = [v for v in values if v is not None]
     if not vals:
         return ""
-    lo, hi = min(vals), max(vals)
+    if len(vals) > width:
+        step = len(vals) / width
+        buckets = []
+        for i in range(width):
+            seg = vals[int(i * step):int((i + 1) * step)] or [vals[-1]]
+            buckets.append(sum(seg) / len(seg))
+        vals = buckets
+    if lo is None:
+        lo = min(vals)
+    if hi is None:
+        hi = max(vals)
+    if min_span is not None and (hi - lo) < min_span:
+        mid = (hi + lo) / 2
+        lo, hi = mid - min_span / 2, mid + min_span / 2
     span = (hi - lo) or 1.0  # avoid divide-by-zero on a flat line
     out = []
     for v in vals:
@@ -61,6 +87,22 @@ def _fmt(v, suffix="", nd=1):
     if isinstance(v, float):
         return f"{v:.{nd}f}{suffix}"
     return f"{v}{suffix}"
+
+
+def _span_label(values, suffix="", nd=1):
+    """A "lo–hi" range over the non-None values, or "" if there's none.
+
+    Shown next to a sparkline so the glyph height has an absolute reference:
+    a flat-looking line then reads as either genuinely steady (small range) or
+    a real trend the auto-scale has zoomed into (wide range). Collapses to a
+    single "v" when lo == hi."""
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return ""
+    lo, hi = min(vals), max(vals)
+    if lo == hi:
+        return _fmt(lo, suffix, nd)
+    return f"{_fmt(lo, '', nd)}–{_fmt(hi, suffix, nd)}"
 
 
 def _fmt_eta(seconds):
@@ -99,7 +141,8 @@ class Dashboard:
             self._live = Live(auto_refresh=False, screen=False)
             self._live.start()
 
-    def update(self, phase, s, history, elapsed, logname, eta_s=None):
+    def update(self, phase, s, history, elapsed, logname, eta_s=None,
+               level_range=(0, 100)):
         """Render one sample.
 
         Parameters
@@ -111,6 +154,9 @@ class Dashboard:
         logname : str      path of the CSV being written (or a placeholder)
         eta_s : float|None  estimated seconds to the target capacity, or None
                             when there's no target (cooldown) or no estimate yet
+        level_range : (lo, hi)  domain the level sparkline is pinned to. Defaults
+                            to the full 0–100% gauge; the drain phase narrows the
+                            floor to its target so the descent fills the height.
         """
         mins, secs = divmod(int(elapsed), 60)
         clock = f"{mins:02d}:{secs:02d}"
@@ -147,9 +193,19 @@ class Dashboard:
         sparks = Table.grid(padding=(0, 2))
         sparks.add_column(justify="right", style="dim")
         sparks.add_column(style="green")
-        sparks.add_row("level", sparkline(history["cap"]))
-        sparks.add_row("temp", sparkline(history["temp"]))
-        sparks.add_row("current", sparkline(history["cur"]))
+        # level: pinned to `level_range` (default the full 0–100% gauge; drain
+        # narrows the floor to its target). temp: auto-scaled so genuine small
+        # trends fill the height, with a small floor to keep sensor jitter from
+        # being amplified, plus a numeric range so the magnitude is explicit.
+        # current: swings widely under load, so plain auto-scale reads best.
+        lvl_lo, lvl_hi = level_range
+        sparks.add_row("level", sparkline(history["cap"], lo=lvl_lo, hi=lvl_hi))
+        sparks.add_row("temp",
+                       sparkline(history["temp"], min_span=2) + "  "
+                       + _span_label(history["temp"], " °C"))
+        sparks.add_row("current",
+                       sparkline(history["cur"]) + "  "
+                       + _span_label(history["cur"], " mA", nd=0))
 
         self._live.update(
             Panel(Group(readings, "", sparks),
