@@ -19,6 +19,7 @@ hold a wakelock for the run (the CLI does `termux-wake-lock` when asked) or
 keep the screen on.
 """
 
+import contextlib
 import csv
 from datetime import datetime
 
@@ -68,7 +69,7 @@ def _estimate_eta(epoch_start, cap_start, epoch_now, cap_now, target_pct):
 
 
 def _run_logged(batt, label, target_pct, stop_when, *,
-                sample_s, history, dashboard, clock):
+                sample_s, history, dashboard, clock, log_to_file, logname=None):
     """Shared body for drain/charge: sample -> log -> dashboard -> check.
 
     Parameters
@@ -81,22 +82,37 @@ def _run_logged(batt, label, target_pct, stop_when, *,
     history : dict         rolling deques for the sparklines
     dashboard : Dashboard  live view to update each sample
     clock : callable      returns elapsed seconds since the run started
+    log_to_file : bool    write a per-phase CSV; if False, sample and display
+                          only and write nothing to disk
+    logname : str | None  explicit CSV path; when None (and logging is on),
+                          a timestamped `{label}_{stamp}.csv` is generated
 
-    Returns the path of the CSV that was written.
+    Returns the path of the CSV that was written, or None if logging was off.
     """
-    logname = f"{label}_{_timestamp()}.csv"
     # Anchor the ETA on the first usable (epoch, capacity) pair so the average
     # rate spans the whole phase. Set on the first sample that has both.
     epoch_start = cap_start = None
-    # newline="" is the documented way to let csv handle line endings itself.
-    with open(logname, "w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
-        writer.writeheader()
+    # When logging is on, open the CSV (explicit name or a per-phase timestamped
+    # default); otherwise run the same sample/dashboard loop but write nothing
+    # to disk. ExitStack lets the file (when present) close on exit without
+    # duplicating the loop body.
+    with contextlib.ExitStack() as stack:
+        if log_to_file:
+            if logname is None:
+                logname = f"{label}_{_timestamp()}.csv"
+            # newline="" lets csv handle line endings itself (documented).
+            fh = stack.enter_context(open(logname, "w", newline=""))
+            writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+        else:
+            logname = None
+            fh = writer = None
 
         while True:
             s = sample(batt)
-            writer.writerow(s)
-            fh.flush()  # flush each row so a killed run still leaves good data
+            if writer is not None:
+                writer.writerow(s)
+                fh.flush()  # flush each row so a killed run leaves good data
             _push_history(history, s)
 
             level = s["capacity_pct"]
@@ -104,7 +120,8 @@ def _run_logged(batt, label, target_pct, stop_when, *,
                 epoch_start, cap_start = s["epoch"], level
             eta_s = _estimate_eta(epoch_start, cap_start,
                                   s["epoch"], level, target_pct)
-            dashboard.update(label, s, history, clock(), logname, eta_s=eta_s)
+            dashboard.update(label, s, history, clock(),
+                             logname or "(no log)", eta_s=eta_s)
 
             if level is not None and stop_when(level, target_pct):
                 break
@@ -120,30 +137,34 @@ def _sleep(seconds):
     time.sleep(seconds)
 
 
-def run_drain(batt, target_low, *, sample_s, history, dashboard, clock):
+def run_drain(batt, target_low, *, sample_s, history, dashboard, clock,
+              log_to_file=False, logname=None):
     """Log the discharge curve until capacity <= `target_low` percent.
 
     Assumes the caller has already started the CPU load; this function only
-    samples and logs. Returns the CSV path.
+    samples and (when `log_to_file`) logs. Returns the CSV path, or None.
     """
     return _run_logged(
         batt, "drain", target_low,
         stop_when=lambda level, target: level <= target,
         sample_s=sample_s, history=history, dashboard=dashboard, clock=clock,
+        log_to_file=log_to_file, logname=logname,
     )
 
 
-def run_charge(batt, target_full, *, sample_s, history, dashboard, clock):
+def run_charge(batt, target_full, *, sample_s, history, dashboard, clock,
+               log_to_file=False, logname=None):
     """Log the charge curve until capacity >= `target_full` percent.
 
     The user must plug in the charger; logging simply records whatever the
     battery reports, including the initial not-yet-charging samples. Returns
-    the CSV path.
+    the CSV path, or None if logging was off.
     """
     return _run_logged(
         batt, "charge", target_full,
         stop_when=lambda level, target: level >= target,
         sample_s=sample_s, history=history, dashboard=dashboard, clock=clock,
+        log_to_file=log_to_file, logname=logname,
     )
 
 

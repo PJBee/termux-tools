@@ -2,7 +2,7 @@
 """
 power_cycle.__main__ — CLI entry point, run as `python -m power_cycle`.
 
-Runs a reproducible battery test cycle and logs each phase to its own CSV:
+Runs a reproducible battery test cycle through three phases:
 
     DRAIN  ->  COOLDOWN  ->  CHARGE
 
@@ -10,11 +10,16 @@ so that charge curves are comparable run-to-run (always measured from a cool,
 known starting state). See the package docstring (power_cycle/__init__.py) for
 the rationale behind the unprivileged-reads / multiprocessing-load design.
 
+By default each phase only samples and displays; pass --log to also write a
+per-phase timestamped CSV.
+
 Examples
 --------
     python -m power_cycle                       # full cycle, default thresholds
     python -m power_cycle --low 15 --cool 28    # custom drain floor & cool target
-    python -m power_cycle --phase charge        # only log a charge curve
+    python -m power_cycle --phase charge        # only run the charge phase
+    python -m power_cycle --log                 # also write per-phase CSVs
+    python -m power_cycle --phase charge --logfile charge.csv  # log to a name
     python -m power_cycle --torch               # add the flashlight to the drain
     python -m power_cycle --no-dash             # plain stdout (e.g. over adb)
     python -m power_cycle --wakelock            # hold a Termux wakelock for the run
@@ -37,6 +42,7 @@ that directory on your PYTHONPATH.
 
 import argparse
 import multiprocessing as mp
+import os
 import signal
 import subprocess
 import sys
@@ -96,6 +102,14 @@ def parse_args(argv=None):
     ap.add_argument("--wakelock", action="store_true",
                     help="hold a Termux wakelock so timing stays honest when "
                          "the screen is off (needs termux-api)")
+    ap.add_argument("--log", action="store_true",
+                    help="write each phase to its own timestamped CSV "
+                         "(default: off — sample and display only)")
+    ap.add_argument("--logfile", metavar="PATH",
+                    help="write the CSV to this path instead of an "
+                         "auto-named one (implies --log; when more than one "
+                         "phase is logged, the phase label is inserted before "
+                         "the extension to keep them distinct)")
     ap.add_argument("--no-dash", action="store_true",
                     help="plain stdout instead of the Rich dashboard")
     ap.add_argument("--version", action="version",
@@ -103,8 +117,29 @@ def parse_args(argv=None):
     return ap.parse_args(argv)
 
 
+def _resolve_logname(logfile, label, disambiguate):
+    """Turn a user-supplied --logfile into a path for one phase.
+
+    With a single logged phase the file is used verbatim; when more than one
+    phase is logged we insert the label before the extension (foo.csv ->
+    foo_drain.csv) so the curves don't clobber each other.
+    """
+    if not disambiguate:
+        return logfile
+    root, ext = os.path.splitext(logfile)
+    return f"{root}_{label}{ext or '.csv'}"
+
+
 def main(argv=None):
     args = parse_args(argv)
+
+    # --logfile implies --log. When it's set and more than one phase will be
+    # logged (only drain and charge write CSVs; cooldown never does), the
+    # per-phase names must be disambiguated so they don't overwrite each other.
+    log_enabled = args.log or args.logfile is not None
+    logged_phases = [p for p in ("drain", "charge")
+                     if args.phase in ("all", p)]
+    disambiguate = len(logged_phases) > 1
 
     # Locate the battery node up front; bail clearly if we can't.
     batt = find_battery()
@@ -135,8 +170,8 @@ def main(argv=None):
     if want_dash and not rich_available():
         print(
             "Note: the optional 'rich' package isn't installed, so the live\n"
-            "      dashboard is disabled. You'll still get full CSV logging\n"
-            "      and per-sample readings — just without the refreshing\n"
+            "      dashboard is disabled. You'll still get per-sample readings\n"
+            "      (and CSVs if you pass --log) — just without the refreshing\n"
             "      panel, table, and sparklines.\n"
             "      Enable it with:  pip install rich\n"
         )
@@ -165,11 +200,15 @@ def main(argv=None):
         if args.phase in ("all", "drain"):
             n = load.start()
             print(f"DRAIN: busy-loop on {n} cores -> {args.low}%")
+            logname = (_resolve_logname(args.logfile, "drain", disambiguate)
+                       if args.logfile else None)
             log = run_drain(batt, args.low, sample_s=args.sample,
                             history=history, dashboard=dashboard,
-                            clock=make_clock())
+                            clock=make_clock(), log_to_file=log_enabled,
+                            logname=logname)
             load.stop()
-            print(f"\nDrain log: {log}")
+            if log:
+                print(f"\nDrain log: {log}")
 
         if args.phase in ("all", "cooldown"):
             print(f"COOLDOWN: waiting until temp <= {args.cool} °C")
@@ -180,10 +219,14 @@ def main(argv=None):
 
         if args.phase in ("all", "charge"):
             print(f"CHARGE: logging until {args.full}% (plug in the charger)")
+            logname = (_resolve_logname(args.logfile, "charge", disambiguate)
+                       if args.logfile else None)
             log = run_charge(batt, args.full, sample_s=args.sample,
                              history=history, dashboard=dashboard,
-                             clock=make_clock())
-            print(f"\nCharge log: {log}")
+                             clock=make_clock(), log_to_file=log_enabled,
+                             logname=logname)
+            if log:
+                print(f"\nCharge log: {log}")
 
     except KeyboardInterrupt:
         print("\nInterrupted — shutting down cleanly.")
