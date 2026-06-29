@@ -40,6 +40,33 @@ def _push_history(history, s):
         history["cur"].append(s["current_ma"])
 
 
+def _estimate_eta(epoch_start, cap_start, epoch_now, cap_now, target_pct):
+    """Estimate seconds until capacity reaches `target_pct`, or None.
+
+    Uses the average rate since the phase started: simple and stable, at the
+    cost of reacting slowly if the discharge/charge rate changes mid-run. We
+    deliberately return None (shown as "—") rather than a misleading number
+    whenever the estimate can't be trusted:
+
+      * any capacity reading missing,
+      * not enough elapsed time / no capacity movement yet (rate ~ 0), or
+      * the battery is momentarily moving the *wrong* way (e.g. a blip up
+        during drain), which would yield a negative ETA.
+    """
+    if cap_start is None or cap_now is None:
+        return None
+    dt = epoch_now - epoch_start
+    dcap = cap_now - cap_start
+    if dt <= 0 or dcap == 0:
+        return None
+    rate = dcap / dt                      # %/sec, signed
+    # cap(t) = cap_now + rate*t; solve cap(t) == target. Positive for both
+    # drain (rate<0, target<cap_now) and charge (rate>0, target>cap_now);
+    # negative means the battery is moving away from the target.
+    eta = (target_pct - cap_now) / rate
+    return eta if eta > 0 else None
+
+
 def _run_logged(batt, label, target_pct, stop_when, *,
                 sample_s, history, dashboard, clock):
     """Shared body for drain/charge: sample -> log -> dashboard -> check.
@@ -58,6 +85,9 @@ def _run_logged(batt, label, target_pct, stop_when, *,
     Returns the path of the CSV that was written.
     """
     logname = f"{label}_{_timestamp()}.csv"
+    # Anchor the ETA on the first usable (epoch, capacity) pair so the average
+    # rate spans the whole phase. Set on the first sample that has both.
+    epoch_start = cap_start = None
     # newline="" is the documented way to let csv handle line endings itself.
     with open(logname, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
@@ -68,9 +98,14 @@ def _run_logged(batt, label, target_pct, stop_when, *,
             writer.writerow(s)
             fh.flush()  # flush each row so a killed run still leaves good data
             _push_history(history, s)
-            dashboard.update(label, s, history, clock(), logname)
 
             level = s["capacity_pct"]
+            if cap_start is None and level is not None:
+                epoch_start, cap_start = s["epoch"], level
+            eta_s = _estimate_eta(epoch_start, cap_start,
+                                  s["epoch"], level, target_pct)
+            dashboard.update(label, s, history, clock(), logname, eta_s=eta_s)
+
             if level is not None and stop_when(level, target_pct):
                 break
             _sleep(sample_s)

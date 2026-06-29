@@ -63,6 +63,18 @@ def _fmt(v, suffix="", nd=1):
     return f"{v}{suffix}"
 
 
+def _fmt_eta(seconds):
+    """Format an ETA in seconds as H:MM:SS / MM:SS, or "—" if unknown."""
+    if seconds is None:
+        return "—"
+    secs = int(seconds)
+    hrs, rem = divmod(secs, 3600)
+    mins, secs = divmod(rem, 60)
+    if hrs:
+        return f"~{hrs}:{mins:02d}:{secs:02d}"
+    return f"~{mins:02d}:{secs:02d}"
+
+
 class Dashboard:
     """Live view abstraction with a Rich back-end and a plain fallback.
 
@@ -87,7 +99,7 @@ class Dashboard:
             self._live = Live(auto_refresh=False, screen=False)
             self._live.start()
 
-    def update(self, phase, s, history, elapsed, logname):
+    def update(self, phase, s, history, elapsed, logname, eta_s=None):
         """Render one sample.
 
         Parameters
@@ -97,6 +109,8 @@ class Dashboard:
         history : dict     {"cap": deque, "temp": deque, "cur": deque}
         elapsed : float    seconds since the phase started
         logname : str      path of the CSV being written (or a placeholder)
+        eta_s : float|None  estimated seconds to the target capacity, or None
+                            when there's no target (cooldown) or no estimate yet
         """
         mins, secs = divmod(int(elapsed), 60)
         clock = f"{mins:02d}:{secs:02d}"
@@ -108,6 +122,7 @@ class Dashboard:
                   f"cur={_fmt(s['current_ma'], 'mA')}  "
                   f"temp={_fmt(s['temp_c'], '°C')}  "
                   f"v={_fmt(s['voltage_v'], 'V', nd=3)}  "
+                  f"eta={_fmt_eta(eta_s)}  "
                   f"{s['status'] or '?'}")
             return
 
@@ -126,6 +141,7 @@ class Dashboard:
         readings.add_row("current", _fmt(s["current_ma"], " mA"))
         readings.add_row("temp", _fmt(s["temp_c"], " °C"))
         readings.add_row("voltage", _fmt(s["voltage_v"], " V", nd=3))
+        readings.add_row("eta", _fmt_eta(eta_s))
         readings.add_row("log", logname)
 
         sparks = Table.grid(padding=(0, 2))
