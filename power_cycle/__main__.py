@@ -37,6 +37,7 @@ that directory on your PYTHONPATH.
 
 import argparse
 import multiprocessing as mp
+import signal
 import subprocess
 import sys
 import time
@@ -53,6 +54,23 @@ from . import (
 # How many recent samples the sparklines retain. ~120 samples at the default
 # 10s cadence is 20 minutes of visible history.
 _HISTORY_LEN = 120
+
+# Upper bound on the termux-api wakelock shell-outs, so an unresponsive
+# Termux:API app can't make acquiring or (worse) releasing the wakelock hang.
+_TERMUX_TIMEOUT = 5
+
+
+def _termux(cmd):
+    """Run a best-effort termux-api command; never raise, never block long.
+
+    Used for the wakelock calls, which sit on the startup and shutdown paths
+    where a hang would be especially user-hostile (a stalled shutdown is what
+    makes people reach for a second Ctrl-C).
+    """
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=_TERMUX_TIMEOUT)
+    except Exception:
+        pass
 
 
 def parse_args(argv=None):
@@ -100,7 +118,7 @@ def main(argv=None):
 
     # Optional wakelock for honest timing with the screen off.
     if args.wakelock:
-        subprocess.run(["termux-wake-lock"], capture_output=True)
+        _termux(["termux-wake-lock"])
 
     # Rolling history shared across phases so sparklines stay continuous.
     history = {
@@ -130,6 +148,19 @@ def main(argv=None):
         start = time.time()
         return lambda: time.time() - start
 
+    # Make a single Ctrl-C enough. The first SIGINT raises KeyboardInterrupt to
+    # unwind whatever phase is running into the finally: block below, and at the
+    # same moment switches SIGINT to SIG_IGN so any *further* Ctrl-C is ignored
+    # while we clean up. Without this, a second Ctrl-C landing during shutdown
+    # could abort it half-done (CPU load still pegged, torch still on); and if a
+    # cleanup step ever blocked, the user would have to hit Ctrl-C again to get
+    # out. Paired with the bounded termux/join timeouts, this guarantees the
+    # cleanup always runs to completion on the first Ctrl-C.
+    def _on_sigint(signum, frame):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        raise KeyboardInterrupt
+
+    prev_sigint = signal.signal(signal.SIGINT, _on_sigint)
     try:
         if args.phase in ("all", "drain"):
             n = load.start()
@@ -158,11 +189,15 @@ def main(argv=None):
         print("\nInterrupted — shutting down cleanly.")
     finally:
         # These must always run: a stray core-pegging worker or a left-on
-        # torch/wakelock would be a nasty thing to leave behind.
+        # torch/wakelock would be a nasty thing to leave behind. Each step is
+        # bounded (worker joins and termux calls all have timeouts) so cleanup
+        # can't hang. Restore the previous SIGINT handler last, once there's
+        # nothing left that a stray Ctrl-C could corrupt.
         load.stop()
         dashboard.close()
         if args.wakelock:
-            subprocess.run(["termux-wake-unlock"], capture_output=True)
+            _termux(["termux-wake-unlock"])
+        signal.signal(signal.SIGINT, prev_sigint)
 
     return 0
 

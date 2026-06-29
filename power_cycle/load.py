@@ -26,6 +26,27 @@ import os
 import signal
 import subprocess
 
+# Upper bound on any termux-api shell-out. The flashlight commands talk to the
+# Termux:API app over a socket; if that app is slow or absent the call can block
+# indefinitely. A short timeout keeps a wedged torch call from hanging the run
+# (most painfully during shutdown — see Load.stop).
+_TORCH_TIMEOUT = 5
+
+
+def _torch(state):
+    """Best-effort flashlight toggle: `state` is "on" or "off".
+
+    Never raises and never blocks for long: a missing termux-torch binary
+    (termux-api not installed) or an unresponsive Termux:API app must not be
+    able to crash a run or stall its cleanup.
+    """
+    try:
+        subprocess.run(["termux-torch", state],
+                       capture_output=True, timeout=_TORCH_TIMEOUT)
+    except Exception:
+        # FileNotFoundError (no termux-api), TimeoutExpired, etc. — all benign.
+        pass
+
 
 def _busy_worker():
     """Peg one CPU core until the process is terminated.
@@ -65,9 +86,7 @@ class Load:
             p.start()
             self._procs.append(p)
         if self._torch:
-            # capture_output keeps termux-torch's chatter off our dashboard;
-            # failure (e.g. termux-api not installed) is non-fatal.
-            subprocess.run(["termux-torch", "on"], capture_output=True)
+            _torch("on")  # non-fatal, bounded — see _torch()
         return n
 
     def stop(self):
@@ -78,7 +97,7 @@ class Load:
             p.join(timeout=2)
         self._procs = []
         if self._torch:
-            subprocess.run(["termux-torch", "off"], capture_output=True)
+            _torch("off")  # bounded so a wedged termux-api can't stall shutdown
 
     @property
     def running(self):
