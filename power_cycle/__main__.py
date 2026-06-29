@@ -180,7 +180,7 @@ def main(argv=None):
             "      panel, table, and sparklines.\n"
             "      Enable it with:  pip install rich\n"
         )
-    dashboard = Dashboard(use_rich=want_dash)
+    dashboard = Dashboard(use_rich=want_dash, temp_floor=args.cool)
     load = Load(torch=args.torch)
 
     # `clock` gives each phase its own elapsed-time origin.

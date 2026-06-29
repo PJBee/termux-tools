@@ -17,6 +17,11 @@ in, so the dashboard stays stateless and easy to reason about.
 # sparklines. Eight levels is plenty of vertical resolution for a terminal.
 _SPARK = "▁▂▃▄▅▆▇█"
 
+# Top of the temperature sparkline's pinned domain, in °C. ~45 °C is where
+# phones typically begin thermal-throttling and a battery reads as "hot", so it
+# makes a sensible full-height reference; readings above it just clamp to full.
+_TEMP_CEILING = 45.0
+
 
 def rich_available():
     """True if the optional `rich` package can be imported.
@@ -131,9 +136,15 @@ class Dashboard:
     use_rich : bool
         If True, use the Rich dashboard when `rich` is installed; otherwise
         fall back to plain output. If False, always use plain output.
+    temp_floor : float | None
+        Pin the bottom of the temperature sparkline to this °C (the run's
+        cooldown target), so the cooldown drop fills the glyph height and ends
+        at the floor — the thermal analogue of the drain level gauge. When
+        None, the temperature line auto-scales to its own range instead.
     """
 
-    def __init__(self, use_rich=True):
+    def __init__(self, use_rich=True, temp_floor=None):
+        self._temp_floor = temp_floor
         self._live = None
         if use_rich and rich_available():
             # Imported lazily so the package works without Rich installed.
@@ -194,17 +205,28 @@ class Dashboard:
         sparks.add_column(justify="right", style="dim")
         sparks.add_column(style="green")
         # level: pinned to `level_range` (default the full 0–100% gauge; drain
-        # narrows the floor to its target). temp: auto-scaled so genuine small
-        # trends fill the height, with a small floor to keep sensor jitter from
-        # being amplified, plus a numeric range so the magnitude is explicit.
-        # current: swings widely under load, so plain auto-scale reads best.
+        # narrows the floor to its target).
         lvl_lo, lvl_hi = level_range
         sparks.add_row("level", sparkline(history["cap"], lo=lvl_lo, hi=lvl_hi))
-        sparks.add_row("temp",
-                       sparkline(history["temp"], min_span=2) + "  "
+
+        # temp: when a cooldown floor is set, pin the domain (floor → ceiling)
+        # so the cooldown descent fills the height; otherwise auto-scale with a
+        # small floor so genuine small trends show without amplifying jitter.
+        # Either way, append the numeric range so the magnitude stays explicit.
+        if self._temp_floor is not None:
+            t_lo = self._temp_floor
+            t_hi = max(_TEMP_CEILING, t_lo + 5)  # guard floor >= ceiling
+            temp_spark = sparkline(history["temp"], lo=t_lo, hi=t_hi)
+        else:
+            temp_spark = sparkline(history["temp"], min_span=2)
+        sparks.add_row("temp", temp_spark + "  "
                        + _span_label(history["temp"], " °C"))
-        sparks.add_row("current",
-                       sparkline(history["cur"]) + "  "
+
+        # current: plot magnitude so heavier flow reads taller regardless of
+        # direction — i.e. a deeper discharge (more negative mA) rises instead
+        # of sinking. The signed range label preserves the actual direction.
+        cur_mag = [abs(v) if v is not None else None for v in history["cur"]]
+        sparks.add_row("current", sparkline(cur_mag) + "  "
                        + _span_label(history["cur"], " mA", nd=0))
 
         self._live.update(
